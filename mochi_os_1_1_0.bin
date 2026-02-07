@@ -1,0 +1,246 @@
+/****************************************************
+ * DASAI MOCHI OS
+ * Version : 1.1.0
+ * Features:
+ * - Love Face
+ * - Meteor Animation
+ * - OTA Update
+ ****************************************************/
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+#include <Update.h>
+#include <Preferences.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <math.h>
+
+/* ===== OS INFO ===== */
+#define OS_NAME    "DASAI MOCHI OS"
+#define OS_VERSION "1.1.0"
+
+/* ===== OLED ===== */
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+/* ===== WIFI ===== */
+WebServer server(80);
+Preferences prefs;
+String wifiSSID, wifiPASS;
+
+/* ===== OTA ===== */
+const char* UPDATE_JSON_URL =
+  "https://domainkamu.com/mochi/update.json";
+
+/* ===== FACE MODE ===== */
+enum FaceMode { NORMAL, LOVE };
+FaceMode faceMode = NORMAL;
+
+/* ===== TIMING ===== */
+unsigned long lastFrame = 0;
+unsigned long lastBlink = 0;
+unsigned long modeTimer = 0;
+
+/* ===== ANIM ===== */
+bool blink = false;
+int eyeOffset = 0;
+
+/* ===== METEOR ===== */
+struct Meteor {
+  int x;
+  int y;
+};
+Meteor meteor;
+
+/* ===== WIFI ===== */
+void startAP() {
+  WiFi.softAP("DASAI-MOCHI");
+}
+
+void connectWiFi() {
+  prefs.begin("wifi", true);
+  wifiSSID = prefs.getString("ssid", "");
+  wifiPASS = prefs.getString("pass", "");
+  prefs.end();
+
+  if (wifiSSID != "") {
+    WiFi.begin(wifiSSID.c_str(), wifiPASS.c_str());
+  }
+}
+
+/* ===== DRAW NORMAL FACE ===== */
+void drawNormalFace() {
+  int eyeY = 26;
+  int mouthY = 46;
+
+  if (millis() - lastBlink > 3000) {
+    blink = random(0, 6) == 0;
+    lastBlink = millis();
+  }
+
+  if (blink) {
+    display.drawLine(34, eyeY, 50, eyeY, WHITE);
+    display.drawLine(78, eyeY, 94, eyeY, WHITE);
+  } else {
+    display.fillCircle(42 + eyeOffset, eyeY, 6, WHITE);
+    display.fillCircle(86 + eyeOffset, eyeY, 6, WHITE);
+  }
+
+  display.drawLine(52, mouthY, 64, mouthY + 6, WHITE);
+  display.drawLine(64, mouthY + 6, 76, mouthY, WHITE);
+}
+
+/* ===== DRAW HEART ===== */
+void drawHeart(int x, int y) {
+  display.fillCircle(x - 3, y - 2, 3, WHITE);
+  display.fillCircle(x + 3, y - 2, 3, WHITE);
+  display.fillTriangle(x - 7, y - 2, x + 7, y - 2, x, y + 6, WHITE);
+}
+
+/* ===== DRAW LOVE FACE ===== */
+void drawLoveFace() {
+  drawHeart(44, 26);
+  drawHeart(84, 26);
+  display.fillCircle(64, 46, 6, WHITE);
+}
+
+/* ===== METEOR ===== */
+void updateMeteor() {
+  display.drawLine(meteor.x, meteor.y,
+                   meteor.x + 4, meteor.y + 2, WHITE);
+  meteor.x -= 4;
+  meteor.y += 2;
+
+  if (meteor.x < 0 || meteor.y > SCREEN_HEIGHT) {
+    meteor.x = random(100, 128);
+    meteor.y = random(0, 20);
+  }
+}
+
+/* ===== DRAW FACE ===== */
+void drawFace() {
+  display.clearDisplay();
+
+  if (faceMode == NORMAL) {
+    drawNormalFace();
+  } else {
+    drawLoveFace();
+    updateMeteor();
+  }
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.print(OS_NAME);
+  display.setCursor(0, 8);
+  display.print("v");
+  display.print(OS_VERSION);
+
+  display.display();
+}
+
+/* ===== VERSION CHECK ===== */
+bool isNewer(String n, String c) {
+  int n1, n2, n3, c1, c2, c3;
+  sscanf(n.c_str(), "%d.%d.%d", &n1, &n2, &n3);
+  sscanf(c.c_str(), "%d.%d.%d", &c1, &c2, &c3);
+  if (n1 != c1) return n1 > c1;
+  if (n2 != c2) return n2 > c2;
+  return n3 > c3;
+}
+
+/* ===== WEB ===== */
+void pageRoot() {
+  server.send(200, "text/html",
+    "<h2>DASAI MOCHI</h2>"
+    "<p>OS Version: " OS_VERSION "</p>"
+    "<a href='/wifi'>WiFi</a><br>"
+    "<a href='/update'>Update OS</a>");
+}
+
+void pageWiFi() {
+  if (server.method() == HTTP_POST) {
+    prefs.begin("wifi", false);
+    prefs.putString("ssid", server.arg("ssid"));
+    prefs.putString("pass", server.arg("pass"));
+    prefs.end();
+    server.send(200, "text/html", "Saved! Rebooting...");
+    delay(1200);
+    ESP.restart();
+  }
+
+  server.send(200, "text/html",
+    "<form method='POST'>"
+    "SSID:<br><input name='ssid'><br>"
+    "Password:<br><input type='password' name='pass'><br><br>"
+    "<button>Save</button></form>");
+}
+
+void pageUpdate() {
+  HTTPClient http;
+  http.begin(UPDATE_JSON_URL);
+  if (http.GET() != 200) return;
+
+  String json = http.getString();
+  http.end();
+
+  int v = json.indexOf("\"latest\"");
+  int u = json.indexOf("\"bin\"");
+  if (v < 0 || u < 0) return;
+
+  String newV =
+    json.substring(json.indexOf(":", v) + 2,
+                   json.indexOf("\"", v + 10));
+
+  if (!isNewer(newV, OS_VERSION)) return;
+
+  String binURL =
+    json.substring(json.indexOf(":", u) + 2,
+                   json.indexOf("\"", u + 6));
+
+  WiFiClient client;
+  http.begin(client, binURL);
+  if (http.GET() != 200) return;
+
+  Update.begin(http.getSize());
+  Update.writeStream(*http.getStreamPtr());
+  if (Update.end(true)) ESP.restart();
+}
+
+/* ===== SETUP ===== */
+void setup() {
+  Wire.begin(21, 22);
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+
+  WiFi.mode(WIFI_AP_STA);
+  startAP();
+  connectWiFi();
+
+  meteor.x = random(100, 128);
+  meteor.y = random(0, 20);
+
+  server.on("/", pageRoot);
+  server.on("/wifi", pageWiFi);
+  server.on("/update", pageUpdate);
+  server.begin();
+}
+
+/* ===== LOOP ===== */
+void loop() {
+  server.handleClient();
+
+  if (millis() - modeTimer > 7000) {
+    faceMode = (faceMode == NORMAL) ? LOVE : NORMAL;
+    modeTimer = millis();
+  }
+
+  if (millis() - lastFrame > 60) {
+    lastFrame = millis();
+    eyeOffset = sin(millis() * 0.003) * 3;
+    drawFace();
+  }
+}
